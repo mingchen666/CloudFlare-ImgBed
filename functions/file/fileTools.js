@@ -92,6 +92,11 @@ export function handleHeadRequest(headers, etag = null) {
         responseHeaders.set('Content-Range', contentRange);
     }
 
+    const vary = headers.get('Vary');
+    if (vary) {
+        responseHeaders.set('Vary', vary);
+    }
+
     if (etag) {
         responseHeaders.set('ETag', etag);
     }
