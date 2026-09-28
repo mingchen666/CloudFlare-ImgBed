@@ -78,6 +78,7 @@ export function setRangeHeaders(headers, rangeStart, rangeEnd, totalSize) {
 // 处理HEAD请求的公共函数
 export function handleHeadRequest(headers, etag = null) {
     const responseHeaders = new Headers();
+    const contentRange = headers.get('Content-Range');
 
     // 复制关键头部
     responseHeaders.set('Content-Length', headers.get('Content-Length') || '0');
@@ -87,14 +88,30 @@ export function handleHeadRequest(headers, etag = null) {
     responseHeaders.set('Accept-Ranges', headers.get('Accept-Ranges') || 'bytes');
     responseHeaders.set('Cache-Control', headers.get('Cache-Control') || 'public, max-age=2592000');
 
+    if (contentRange) {
+        responseHeaders.set('Content-Range', contentRange);
+    }
+
     if (etag) {
         responseHeaders.set('ETag', etag);
     }
 
     return new Response(null, {
-        status: 200,
+        status: contentRange ? 206 : 200,
         headers: responseHeaders,
     });
+}
+
+// 从上游响应复制文件长度相关头部
+export function copyFileLengthHeaders(headers, sourceHeaders) {
+    const contentLength = sourceHeaders.get('Content-Length');
+    if (contentLength) {
+        headers.set('Content-Length', contentLength);
+    }
+    const contentRange = sourceHeaders.get('Content-Range');
+    if (contentRange) {
+        headers.set('Content-Range', contentRange);
+    }
 }
 
 const UPSTREAM_FILE_REQUEST_HEADERS = [

@@ -5,7 +5,7 @@ import { DiscordAPI } from "../utils/storage/discordAPI";
 import { HuggingFaceAPI } from "../utils/storage/huggingfaceAPI";
 import { buildWebDAVUrl, WebDAVAPI } from "../utils/storage/webdavAPI";
 import {
-    setCommonHeaders, setRangeHeaders, handleHeadRequest, getFileContent, isTgChannel,
+    setCommonHeaders, setRangeHeaders, handleHeadRequest, copyFileLengthHeaders, getFileContent, isTgChannel,
     returnWithCheck, return404, returnBlockImg, isDomainAllowed, FILE_CACHE_CONTROL
 } from './fileTools';
 import { getDatabase } from '../utils/databaseAdapter.js';
@@ -672,6 +672,32 @@ async function handleR2File(context, fileId, encodedFileName, fileType) {
 
         // 检查Range请求头
         const range = request.headers.get('Range');
+
+        // HEAD 请求只需元数据，R2 的 size 不在 httpMetadata 里，需显式写入
+        if (request.method === 'HEAD') {
+            const objectMeta = await R2DataBase.head(fileId);
+            if (objectMeta === null) {
+                return new Response('Error: Failed to fetch file', { status: 500 });
+            }
+
+            const headHeaders = new Headers();
+            objectMeta.writeHttpMetadata(headHeaders);
+            setCommonHeaders(headHeaders, encodedFileName, fileType, getFileCacheControl(context));
+
+            const matches = range ? range.match(/bytes=(\d+)-(\d*)/) : null;
+            if (matches) {
+                const start = parseInt(matches[1]);
+                const end = matches[2] ? Math.min(parseInt(matches[2]), objectMeta.size - 1) : objectMeta.size - 1;
+                if (start < objectMeta.size && start <= end) {
+                    setRangeHeaders(headHeaders, start, end, objectMeta.size);
+                    return handleHeadRequest(headHeaders);
+                }
+            }
+
+            headHeaders.set('Content-Length', objectMeta.size.toString());
+            return handleHeadRequest(headHeaders);
+        }
+
         let object;
 
         if (range) {
@@ -706,11 +732,6 @@ async function handleR2File(context, fileId, encodedFileName, fileType) {
         object.writeHttpMetadata(headers);
         setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context));
 
-        // 处理HEAD请求
-        if (request.method === 'HEAD') {
-            return handleHeadRequest(headers);
-        }
-
         // 如果是Range请求，设置相应的状态码和头
         if (range && object.range) {
             headers.set('Content-Range', `bytes ${object.range.offset}-${object.range.offset + object.range.length - 1}/${object.size}`);
@@ -744,9 +765,22 @@ async function handleS3File(context, metadata, encodedFileName, fileType) {
         try {
             // 处理 HEAD 请求
             if (request.method === 'HEAD') {
+                const headReqHeaders = new Headers();
+                const range = request.headers.get('Range');
+                if (range) {
+                    headReqHeaders.set('Range', range);
+                }
+
+                const headResponse = await fetch(cdnFileUrl, { method: 'HEAD', headers: headReqHeaders });
+                if (!headResponse.ok && headResponse.status !== 206) {
+                    console.warn(`CDN HEAD failed (${headResponse.status}), falling back to S3 API`);
+                    return await handleS3FileViaAPI(context, metadata, encodedFileName, fileType);
+                }
+
                 const headers = new Headers();
                 setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context));
-                return handleHeadRequest(headers);
+                copyFileLengthHeaders(headers, headResponse.headers);
+                return handleHeadRequest(headers, headResponse.headers.get('ETag'));
             }
 
             // 构建请求头
@@ -900,9 +934,18 @@ async function handleDiscordFile(context, metadata, encodedFileName, fileType) {
 
         // 处理 HEAD 请求
         if (request.method === 'HEAD') {
+            const headReqHeaders = {};
+            const headRange = request.headers.get('Range');
+            if (headRange) {
+                headReqHeaders['Range'] = headRange;
+            }
+
+            const headResponse = await fetch(fileUrl, { method: 'HEAD', headers: headReqHeaders });
+
             const headers = new Headers();
             setCommonHeaders(headers, encodedFileName, fileType, getFileCacheControl(context));
-            return handleHeadRequest(headers);
+            copyFileLengthHeaders(headers, headResponse.headers);
+            return handleHeadRequest(headers, headResponse.headers.get('ETag'));
         }
 
         // 获取文件内容（支持 Range 请求）
